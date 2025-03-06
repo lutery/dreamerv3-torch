@@ -149,6 +149,8 @@ def make_env(config, mode, id):
     param config: 配置文件
     param mode: 模式,train or eval
     param id: id,环境id
+
+    todo 仅完成atari环境的注释，其他环境的注释待补充
     '''
     suite, task = config.task.split("_", 1)
     if suite == "dmc":
@@ -244,6 +246,7 @@ def main(config):
         directory = config.offline_traindir.format(**vars(config))
     else:
         directory = config.traindir
+    # 这个加载的是数据集？todo
     train_eps = tools.load_episodes(directory, limit=config.dataset_size)
     if config.offline_evaldir:
         directory = config.offline_evaldir.format(**vars(config))
@@ -266,25 +269,32 @@ def main(config):
     make = lambda mode, id: make_env(config, mode, id)
     train_envs = [make("train", i) for i in range(config.envs)]
     eval_envs = [make("eval", i) for i in range(config.envs)]
+    # 是否开启多进程，todo 这次的dreamerv3的代码引入这个功能，提高训练速度
     if config.parallel:
         train_envs = [Parallel(env, "process") for env in train_envs]
         eval_envs = [Parallel(env, "process") for env in eval_envs]
     else:
         train_envs = [Damy(env) for env in train_envs]
         eval_envs = [Damy(env) for env in eval_envs]
+    # 动作空间的维度
     acts = train_envs[0].action_space
     print("Action Space", acts)
+    # 获取动作数量n
     config.num_actions = acts.n if hasattr(acts, "n") else acts.shape[0]
 
     state = None
     if not config.offline_traindir:
+        # 如果没有离线训练数据，则需要预填充数据集
+        # 获取缓冲区还要填充的步数，如果缓冲区已经有数据，则减去已经有的步数
         prefill = max(0, config.prefill - count_steps(config.traindir))
         print(f"Prefill dataset ({prefill} steps).")
         if hasattr(acts, "discrete"):
+            # 如果动作空间是离散的，则使用随机分布生成随机动作
             random_actor = tools.OneHotDist(
                 torch.zeros(config.num_actions).repeat(config.envs, 1)
             )
         else:
+            # 如果动作空间是连续的，则使用均匀分布生成随机动作
             random_actor = torchd.independent.Independent(
                 torchd.uniform.Uniform(
                     torch.tensor(acts.low).repeat(config.envs, 1),
@@ -294,6 +304,7 @@ def main(config):
             )
 
         def random_agent(o, d, s):
+            # return: 采样的动作和动作的对数概率
             action = random_actor.sample()
             logprob = random_actor.log_prob(action)
             return {"action": action, "logprob": logprob}, None

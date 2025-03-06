@@ -137,6 +137,12 @@ def simulate(
     episodes=0,
     state=None,
 ):
+    '''
+    
+    param episodes: 最大的episode数
+    param step: 最大的步数
+    param state: 存储step, episode, done, length, obs, agent_state, reward。预热时传入的是None
+    '''
     # initialize or unpack simulation state
     if state is None:
         step, episode = 0, 0
@@ -150,15 +156,19 @@ def simulate(
     while (steps and step < steps) or (episodes and episode < episodes):
         # reset envs if necessary
         if done.any():
+            # 找到真实结束的索引
             indices = [index for index, d in enumerate(done) if d]
+            # 对应的环境重置
             results = [envs[i].reset() for i in indices]
+            # 获取实际的reset结果，中途应该是被包装成了一个call对象
+            # todo 找到具体的包装对象以及results对象的实际内容是什么
             results = [r() for r in results]
             for index, result in zip(indices, results):
                 t = result.copy()
                 t = {k: convert(v) for k, v in t.items()}
                 # action will be added to transition in add_to_cache
-                t["reward"] = 0.0
-                t["discount"] = 1.0
+                t["reward"] = 0.0 # reset后将reward置为0
+                t["discount"] = 1.0 # reset后将discount置为1
                 # initial state should be added to cache
                 add_to_cache(cache, envs[index].id, t)
                 # replace obs with done by initial state
@@ -250,6 +260,29 @@ def simulate(
 
 
 def add_to_cache(cache, id, transition):
+    '''
+    cache的缓冲区是连续的，并且允许中间存在游戏结束
+    param cache: 一个字典，key是环境的id，value是一个字典，存储了一个episode的所有transition(reward, discount, action, etc.)
+    cachae的结构如下：
+    {
+        id1: {
+            "reward": [reward1, reward2, ...],
+            "discount": [discount1, discount2, ...],
+            "action": [action1, action2, ...],
+            ...
+        },
+        id2: {
+            "reward": [reward1, reward2, ...],
+            "discount": [discount1, discount2, ...],
+            "action": [action1, action2, ...],
+            ...
+        },
+        ...
+    }
+    
+    param id: 环境的id
+    param transition: 一个字典，存储了一个transition的所有信息(reward, discount, action, etc.)
+    '''
     if id not in cache:
         cache[id] = dict()
         for key, val in transition.items():

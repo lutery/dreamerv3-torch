@@ -1,7 +1,14 @@
 import gymnasium as gym
 import numpy as np
 
-
+# 对游戏环境采用了
+# 1. 跳帧
+# 2. 缩放
+# 3. 灰度
+# 4. 粘性动作
+# 5. 多帧最大值合并
+# 6. 重置时空等待
+# 7. One-Hot动作生成和解析
 class Atari:
     LOCK = None
     metadata = {}
