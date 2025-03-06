@@ -145,6 +145,11 @@ def make_dataset(episodes, config):
 
 
 def make_env(config, mode, id):
+    '''
+    param config: 配置文件
+    param mode: 模式,train or eval
+    param id: id,环境id
+    '''
     suite, task = config.task.split("_", 1)
     if suite == "dmc":
         import envs.dmc as dmc
@@ -244,6 +249,19 @@ def main(config):
         directory = config.offline_evaldir.format(**vars(config))
     else:
         directory = config.evaldir
+    # 方法用于从指定目录加载训练或评估数据集。它会读取目录中的 .npz 文件，并将每个文件的内容加载到一个有序字典中。每个文件代表一个 episode，包含状态、动作、奖励等信息
+    # todo 这个数据集的结构是什么样子的
+    '''
+    数据集是一个有序字典（OrderedDict），其中每个键是一个 episode 的文件名（去掉扩展名），每个值是一个包含该 episode 数据的字典。每个 episode 数据的字典包含多个键值对，通常包括状态、动作、奖励和下一状态等信息。
+
+    假设每个 .npz 文件包含以下数据结构：
+
+    states: 一个数组，表示每个时间步的状态。
+    actions: 一个数组，表示每个时间步的动作。
+    rewards: 一个数组，表示每个时间步的奖励。
+    next_states: 一个数组，表示每个时间步的下一状态。
+    dones: 一个数组，表示每个时间步是否结束
+    '''
     eval_eps = tools.load_episodes(directory, limit=1)
     make = lambda mode, id: make_env(config, mode, id)
     train_envs = [make("train", i) for i in range(config.envs)]

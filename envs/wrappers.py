@@ -45,6 +45,10 @@ class NormalizeActions(gym.Wrapper):
 
 
 class OneHotAction(gym.Wrapper):
+    '''
+    生成one-hot分布的动作
+    将传入的one-hot动作转换为索引，然后传给环境
+    '''
     def __init__(self, env):
         assert isinstance(env.action_space, gym.spaces.Discrete)
         super().__init__(env)

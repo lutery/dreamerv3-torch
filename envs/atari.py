@@ -1,4 +1,4 @@
-import gym
+import gymnasium as gym
 import numpy as np
 
 
@@ -42,7 +42,7 @@ class Atari:
 
         if name == "james_bond":
             name = "jamesbond"
-        self._repeat = action_repeat
+        self._repeat = action_repeat # 动作重复次数，类似于帧跳帧
         self._size = size
         self._gray = gray
         self._noops = noops
@@ -52,14 +52,15 @@ class Atari:
         self._random = np.random.RandomState(seed)
         with self.LOCK:
             self._env = gym.envs.atari.AtariEnv(
-                game=name,
-                obs_type="image",
-                frameskip=1,
-                repeat_action_probability=0.25 if sticky else 0.0,
-                full_action_space=(actions == "all"),
+                game=name, # 游戏名称
+                obs_type="image", # 环境观察类型
+                frameskip=1, # 不跳帧
+                repeat_action_probability=0.25 if sticky else 0.0, # 可配置是否粘性动作
+                full_action_space=(actions == "all"), # 是否使用所有动作
             )
         assert self._env.unwrapped.get_action_meanings()[0] == "NOOP"
         shape = self._env.observation_space.shape
+        # 存储两帧图像
         self._buffer = [np.zeros(shape, np.uint8) for _ in range(2)]
         self._ale = self._env.unwrapped.ale
         self._last_lives = None
@@ -134,8 +135,10 @@ class Atari:
         return obs
 
     def _obs(self, reward, is_first=False, is_last=False, is_terminal=False):
+        # 选择两帧图像中的最大值，以避免闪烁
         np.maximum(self._buffer[0], self._buffer[1], out=self._buffer[0])
         image = self._buffer[0]
+        # 缩放
         if image.shape[:2] != self._size:
             if self._resize == "opencv":
                 image = self._cv2.resize(
@@ -145,6 +148,7 @@ class Atari:
                 image = self._image.fromarray(image)
                 image = image.resize(self._size, self._image.NEAREST)
                 image = np.array(image)
+        # 灰度
         if self._gray:
             weights = [0.299, 0.587, 1 - (0.299 + 0.587)]
             image = np.tensordot(image, weights, (-1, 0)).astype(image.dtype)
@@ -157,6 +161,9 @@ class Atari:
         )
 
     def _screen(self, array):
+        '''
+        方法的作用是从 Atari 环境中获取当前屏幕的 RGB 图像，并将其存储在提供的数组中
+        '''
         self._ale.getScreenRGB2(array)
 
     def close(self):
