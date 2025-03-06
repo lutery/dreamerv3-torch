@@ -7,7 +7,7 @@ import sys
 os.environ["MUJOCO_GL"] = "osmesa"
 
 import numpy as np
-import ruamel.yaml as yaml
+from ruamel.yaml import YAML
 
 sys.path.append(str(pathlib.Path(__file__).parent))
 
@@ -133,6 +133,7 @@ class Dreamer(nn.Module):
                 self._metrics[name].append(value)
 
 
+# 函数在代码中的作用是计算已经完成的训练步骤数。它通常会遍历指定目录中的训练数据文件，并根据文件的数量或内容来计算已经完成的训练步骤数
 def count_steps(folder):
     return sum(int(str(n).split("-")[-1][:-4]) - 1 for n in folder.glob("*.npz"))
 
@@ -219,12 +220,22 @@ def main(config):
     logdir.mkdir(parents=True, exist_ok=True)
     config.traindir.mkdir(parents=True, exist_ok=True)
     config.evaldir.mkdir(parents=True, exist_ok=True)
+    # 已完成的步数
     step = count_steps(config.traindir)
     # step in logger is environmental step
     logger = tools.Logger(logdir, config.action_repeat * step)
 
     print("Create envs.")
     if config.offline_traindir:
+        '''
+        在 DreamerV3 算法中，离线训练数据是指预先收集并存储在磁盘上的环境交互数据。这些数据可以用于训练模型，而不需要在训练过程中实时与环境进行交互。离线训练数据通常包含状态、动作、奖励和下一状态等信息。
+
+        生成离线训练数据的步骤通常如下：
+
+        与环境交互：使用一个策略（可以是随机策略、预训练策略或专家策略）与环境进行交互，收集状态、动作、奖励和下一状态等信息。
+        存储数据：将收集到的数据存储在磁盘上，通常以文件的形式保存，每个文件包含一个或多个回合的数据。
+        加载数据：在训练过程中，从磁盘加载这些离线数据，并用于训练模型
+        '''
         directory = config.offline_traindir.format(**vars(config))
     else:
         directory = config.traindir
@@ -342,8 +353,14 @@ def main(config):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--configs", nargs="+")
+    '''
+    args 包含解析后的命令行参数，通常是一个命名空间对象，其中属性名对应参数名，属性值对应参数值。
+    remaining 包含未被解析的命令行参数列表。
+    这里只是在解析参数名字
+    '''
     args, remaining = parser.parse_known_args()
-    configs = yaml.safe_load(
+    yaml = YAML(typ='rt')
+    configs = yaml.load(
         (pathlib.Path(sys.argv[0]).parent / "configs.yaml").read_text()
     )
 
@@ -354,12 +371,15 @@ if __name__ == "__main__":
             else:
                 base[key] = value
 
+    # 加载默认配置文件和指定的配置文件，并将它们合并到一个字典中。
     name_list = ["defaults", *args.configs] if args.configs else ["defaults"]
     defaults = {}
     for name in name_list:
         recursive_update(defaults, configs[name])
     parser = argparse.ArgumentParser()
+    # 将默认配置中的每个键值对添加为命令行参数，并将其值转换为相应的类型。
     for key, value in sorted(defaults.items(), key=lambda x: x[0]):
         arg_type = tools.args_type(value)
         parser.add_argument(f"--{key}", type=arg_type, default=arg_type(value))
+    # 解析命令行参数 todo：为什么要解析未被解析的命令行参数列表remaining
     main(parser.parse_args(remaining))
