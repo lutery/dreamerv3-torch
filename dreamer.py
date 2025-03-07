@@ -27,6 +27,14 @@ to_np = lambda x: x.detach().cpu().numpy()
 
 class Dreamer(nn.Module):
     def __init__(self, obs_space, act_space, config, logger, dataset):
+        '''
+        param obs_space: 观察空间
+        param act_space: 动作空间
+        param config: 配置文件
+        param logger: 日志
+        param dataset: 数据集
+        '''
+
         super(Dreamer, self).__init__()
         self._config = config
         self._logger = logger
@@ -139,6 +147,10 @@ def count_steps(folder):
 
 
 def make_dataset(episodes, config):
+    '''
+    param episodes: episodes 加载的环境连续过程的数据
+    param config: 配置文件
+    '''
     generator = tools.sample_episodes(episodes, config.batch_length)
     dataset = tools.from_generator(generator, config.batch_size)
     return dataset
@@ -322,7 +334,9 @@ def main(config):
         print(f"Logger: ({logger.step} steps).")
 
     print("Simulate agent.")
+    # 这里开始模拟数据转换为训练数据和评估数据
     train_dataset = make_dataset(train_eps, config)
+    # 一开始评估数据集是空的，后续逐步填充
     eval_dataset = make_dataset(eval_eps, config)
     agent = Dreamer(
         train_envs[0].observation_space,

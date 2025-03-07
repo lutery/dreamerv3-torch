@@ -175,6 +175,7 @@ def simulate(
                 obs[index] = result
         # step agents
         obs = {k: np.stack([o[k] for o in obs]) for k in obs[0] if "log_" not in k}
+        # 有点像ptan，多了一个done
         action, agent_state = agent(obs, done, agent_state)
         if isinstance(action, dict):
             action = [
@@ -184,31 +185,40 @@ def simulate(
         else:
             action = np.array(action)
         assert len(action) == len(envs)
-        # step envs
+        # step envs 将动作转换为action array，进行step
         results = [e.step(a) for e, a in zip(envs, action)]
+        # 获取运行结果results，包含[(obs, reward, done, info), ...]
         results = [r() for r in results]
         obs, reward, done = zip(*[p[:3] for p in results])
         obs = list(obs)
         reward = list(reward)
         done = np.stack(done)
-        episode += int(done.sum())
-        length += 1
-        step += len(envs)
-        length *= 1 - done
+        episode += int(done.sum()) # 它在统计当前这一步中完成（done）的环境数量。因为代码中可能存在多个并行环境，done 是一个表示各个环境是否结束的布尔数组，对其求和可以得到结束的环境数量。将这个数量加到 episode 中，就可以累加已经完成的回合数
+        length += 1 # 
+        step += len(envs) # 本次执行了多少步，每个环境都执行了一步
+        length *= 1 - done # 该语句用于在并行环境中，对已完成的回合（done 为 True）的环境将其长度重置为 0
         # add to cache
         for a, result, env in zip(action, results, envs):
+            # d代表是否结束，true表示结束，false表示未结束
             o, r, d, info = result
+            # 将观察信息字典进行转换为numpy的类型
             o = {k: convert(v) for k, v in o.items()}
+            # 存储transition信息，包含reward, discount, action等
             transition = o.copy()
             if isinstance(a, dict):
                 transition.update(a)
             else:
                 transition["action"] = a
             transition["reward"] = r
+            # discount是一个衰减因子，用于计算折扣回报，如果d为false，discount为1，否则为0
             transition["discount"] = info.get("discount", np.array(1 - float(d)))
+            # 将执行的每一步存储到cache中
             add_to_cache(cache, env.id, transition)
 
         if done.any():
+            # 找到真实结束的索引
+            # todo 这边的功能应该只是保存游戏结束的episode信息，中间包含运行中的状态
+            # 供后续的中断训练可持续使用
             indices = [index for index, d in enumerate(done) if d]
             # logging for done episode
             for i in indices:
@@ -330,6 +340,7 @@ def save_episodes(directory, episodes):
     directory.mkdir(parents=True, exist_ok=True)
     for filename, episode in episodes.items():
         length = len(episode["reward"])
+        # 这里的filename应该是环境id
         filename = directory / f"{filename}-{length}.npz"
         with io.BytesIO() as f1:
             np.savez_compressed(f1, **episode)
@@ -354,6 +365,13 @@ def from_generator(generator, batch_size):
 
 
 def sample_episodes(episodes, length, seed=0):
+    '''
+    生成数据采样器
+    param episodes: 一个字典，key是环境的id，value是一个字典，存储了一个episode的所有transition(reward, discount, action, etc.)
+    param length: 采样的长度,也就是batch size
+    param seed: 随机数种子
+    '''
+
     np_random = np.random.RandomState(seed)
     while True:
         size = 0
