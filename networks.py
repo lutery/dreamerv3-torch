@@ -11,6 +11,10 @@ import tools
 
 
 class RSSM(nn.Module):
+    '''
+    dreamer特有的rssm模型
+    '''
+
     def __init__(
         self,
         stoch=30,
@@ -30,18 +34,18 @@ class RSSM(nn.Module):
         device=None,
     ):
         super(RSSM, self).__init__()
-        self._stoch = stoch
+        self._stoch = stoch # dreamer 随机特征编码的维度 todo
         self._deter = deter
         self._hidden = hidden
         self._min_std = min_std
         self._rec_depth = rec_depth
-        self._discrete = discrete
+        self._discrete = discrete # 状态的表示方式，是连续的还是离散的
         act = getattr(torch.nn, act)
         self._mean_act = mean_act
         self._std_act = std_act
         self._unimix_ratio = unimix_ratio
         self._initial = initial
-        self._num_actions = num_actions
+        self._num_actions = num_actions # 动作数量
         self._embed = embed
         self._device = device
 
@@ -50,17 +54,21 @@ class RSSM(nn.Module):
             inp_dim = self._stoch * self._discrete + num_actions
         else:
             inp_dim = self._stoch + num_actions
+        # todo 看实际输入时，具体时什么数据传入的
+        # 看起来是将随机特征编码和动作拼接在一起进行特征菜样，应该是先验状态特征吧
         inp_layers.append(nn.Linear(inp_dim, self._hidden, bias=False))
         if norm:
             inp_layers.append(nn.LayerNorm(self._hidden, eps=1e-03))
         inp_layers.append(act())
         self._img_in_layers = nn.Sequential(*inp_layers)
         self._img_in_layers.apply(tools.weight_init)
+        # 构建grucell的单元，传入的先验状态特征编码，输出确定性状态特征编码
         self._cell = GRUCell(self._hidden, self._deter, norm=norm)
         self._cell.apply(tools.weight_init)
 
         img_out_layers = []
         inp_dim = self._deter
+        # 构建确定性编码再次提取特征的层道隐藏层的映射
         img_out_layers.append(nn.Linear(inp_dim, self._hidden, bias=False))
         if norm:
             img_out_layers.append(nn.LayerNorm(self._hidden, eps=1e-03))
@@ -69,6 +77,7 @@ class RSSM(nn.Module):
         self._img_out_layers.apply(tools.weight_init)
 
         obs_out_layers = []
+        # todo 构建确定性编码和一个不知道是什么的编码拼接的层，提取特征
         inp_dim = self._deter + self._embed
         obs_out_layers.append(nn.Linear(inp_dim, self._hidden, bias=False))
         if norm:
@@ -77,7 +86,11 @@ class RSSM(nn.Module):
         self._obs_out_layers = nn.Sequential(*obs_out_layers)
         self._obs_out_layers.apply(tools.weight_init)
 
+        # self._discrete相当于dreamerv2中的rssm_type
+        # todo 搞清楚这里是在输出什么数据
         if self._discrete:
+            # 如果时离散的，那么就是logit
+            # 这里离散的输出和dreamerv2不一样，不知道时不是dreamerv3的特点 todo
             self._imgs_stat_layer = nn.Linear(
                 self._hidden, self._stoch * self._discrete
             )
@@ -85,6 +98,7 @@ class RSSM(nn.Module):
             self._obs_stat_layer = nn.Linear(self._hidden, self._stoch * self._discrete)
             self._obs_stat_layer.apply(tools.uniform_weight_init(1.0))
         else:
+            # 如果是连续的，那么就是均值和方差
             self._imgs_stat_layer = nn.Linear(self._hidden, 2 * self._stoch)
             self._imgs_stat_layer.apply(tools.uniform_weight_init(1.0))
             self._obs_stat_layer = nn.Linear(self._hidden, 2 * self._stoch)
@@ -95,6 +109,8 @@ class RSSM(nn.Module):
                 torch.zeros((1, self._deter), device=torch.device(self._device)),
                 requires_grad=True,
             )
+
+        # todo 注释上面这么多网络的数据流动
 
     def initial(self, batch_size):
         deter = torch.zeros(batch_size, self._deter, device=self._device)
@@ -305,16 +321,36 @@ class MultiEncoder(nn.Module):
         mlp_units,
         symlog_inputs,
     ):
+        
+        '''
+         atari:
+        {mlp_keys: '$^', cnn_keys: 'image', act: 'SiLU', norm: True, cnn_depth: 32, kernel_size: 4, minres: 4, mlp_layers: 5, mlp_units: 1024, symlog_inputs: True}
+        '''
         super(MultiEncoder, self).__init__()
         excluded = ("is_first", "is_last", "is_terminal", "reward")
+        '''
+        atari:
+        "image": (3, 64, 64)
+        '''
         shapes = {
             k: v
             for k, v in shapes.items()
             if k not in excluded and not k.startswith("log_")
         }
+        '''
+        atari:
+        k == image
+       cnn_keys: 'image'
+       cnn_shapes: {'image': (3, 64, 64)}
+        '''
         self.cnn_shapes = {
             k: v for k, v in shapes.items() if len(v) == 3 and re.match(cnn_keys, k)
         }
+
+        '''
+        atari:
+        mlp_shapes: {}
+        '''
         self.mlp_shapes = {
             k: v
             for k, v in shapes.items()
@@ -325,11 +361,15 @@ class MultiEncoder(nn.Module):
 
         self.outdim = 0
         if self.cnn_shapes:
+            # 如果是图像空间则采用卷积
+            # 从这里来看，从观察空间获取的顺序应该是（h, w, c）
             input_ch = sum([v[-1] for v in self.cnn_shapes.values()])
+            # input_shape = (64, 64, 3)
             input_shape = tuple(self.cnn_shapes.values())[0][:2] + (input_ch,)
             self._cnn = ConvEncoder(
                 input_shape, cnn_depth, act, norm, kernel_size, minres
             )
+            # 得到特征编码层的输出维度大小
             self.outdim += self._cnn.outdim
         if self.mlp_shapes:
             input_size = sum([sum(v) for v in self.mlp_shapes.values()])
@@ -455,14 +495,22 @@ class ConvEncoder(nn.Module):
         kernel_size=4,
         minres=4,
     ):
+        '''
+        具体参数看config文件
+
+        depth: 32表示每次卷积层的输出通道数
+        minres：4表示最小的分辨率,也就是卷积的输出尺寸
+        '''
         super(ConvEncoder, self).__init__()
         act = getattr(torch.nn, act)
         h, w, input_ch = input_shape
+        # 这里就是计算要将输入的图片压缩到最小分辨率的输出尺寸所需要的层数
         stages = int(np.log2(h) - np.log2(minres))
         in_dim = input_ch
         out_dim = depth
         layers = []
         for i in range(stages):
+            # 这里是保证每次卷积后，输出的尺寸减少一半
             layers.append(
                 Conv2dSamePad(
                     in_channels=in_dim,
@@ -479,12 +527,16 @@ class ConvEncoder(nn.Module):
             out_dim *= 2
             h, w = h // 2, w // 2
 
+        # 这里应该是计算展平后的维度
+        # 这里除以2是因为之前的循环最后一次乘以2是无效，所以要还原
         self.outdim = out_dim // 2 * h * w
         self.layers = nn.Sequential(*layers)
+        # 权重初始化
         self.layers.apply(tools.weight_init)
 
     def forward(self, obs):
         obs -= 0.5
+        # 这里的转换也很象之前的dreamv2中的转换,但是不同的是dreamerv2中时time， batch h w c
         # (batch, time, h, w, ch) -> (batch * time, h, w, ch)
         x = obs.reshape((-1,) + tuple(obs.shape[-3:]))
         # (batch * time, h, w, ch) -> (batch * time, ch, h, w)
@@ -799,6 +851,10 @@ class Conv2dSamePad(torch.nn.Conv2d):
 
 
 class ImgChLayerNorm(nn.Module):
+
+    '''
+    todo 很奇怪的正则化方式
+    '''
     def __init__(self, ch, eps=1e-03):
         super(ImgChLayerNorm, self).__init__()
         self.norm = torch.nn.LayerNorm(ch, eps=eps)

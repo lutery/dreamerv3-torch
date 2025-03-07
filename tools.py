@@ -351,13 +351,22 @@ def save_episodes(directory, episodes):
 
 
 def from_generator(generator, batch_size):
+    '''
+    yield: 返回合并后的数据，合并后还是字典类型
+    '''
+
     while True:
         batch = []
+        # generator每次返回batch_length个长度的数据
+        # 总共循环batch_size次，每次取出batch_length个数据
         for _ in range(batch_size):
             batch.append(next(generator))
         data = {}
         for key in batch[0].keys():
+            # 得到采集的数据的key，比如reward, discount, action等
             data[key] = []
+            # 将所有数据的key的数据取出来，组成一个batch_size * batch_length的数据
+            # todo 注意is_first这个特点
             for i in range(batch_size):
                 data[key].append(batch[i][key])
             data[key] = np.stack(data[key], 0)
@@ -367,20 +376,26 @@ def from_generator(generator, batch_size):
 def sample_episodes(episodes, length, seed=0):
     '''
     生成数据采样器
-    param episodes: 一个字典，key是环境的id，value是一个字典，存储了一个episode的所有transition(reward, discount, action, etc.)
+    param episodes: 一个字典，key是环境的id，value是一个字典，存储了一个episode的所有transition(reward 数组, discount 数组, action 数组, etc.) 数组
     param length: 采样的长度,也就是batch size
     param seed: 随机数种子
+
+    yield ret: 一个字典，存储了一个batch的所有transition(reward 数组, discount 数组, action 数组, etc.) 数组
     '''
 
     np_random = np.random.RandomState(seed)
     while True:
         size = 0
         ret = None
+        # episodes.values() 获取所有环境的游戏过程数据
+        # episode.values() 获取一个环境的游戏过程数据列表，即：reward 数组, discount 数组, action 数组, etc.
+        # len(next(iter(episode.values()))) 获取一个环境的游戏采集了几个维度大小的数据，即：reward 数组, discount 数组, action 数组, etc.有几个元素
         p = np.array(
             [len(next(iter(episode.values()))) for episode in episodes.values()]
         )
         p = p / np.sum(p)
         while size < length:
+            # 选择其中一个环境的数据
             episode = np_random.choice(list(episodes.values()), p=p)
             total = len(next(iter(episode.values())))
             # make sure at least one transition included
@@ -393,10 +408,13 @@ def sample_episodes(episodes, length, seed=0):
                     for k, v in episode.items()
                     if "log_" not in k
                 }
+                # todo 这里的is_first和is_last是什么意思
+                # 推测这里的is_first为True是在模拟这一段采集的数据都是reset环境后的第一步
                 if "is_first" in ret:
                     ret["is_first"][0] = True
             else:
                 # 'is_first' comes after 'is_last'
+                # 继续填充剩余的数据
                 index = 0
                 possible = length - size
                 ret = {

@@ -1,6 +1,6 @@
 defaults:
 
-  logdir: null
+  logdir: "/Users/yanghui/projects/opensource/python/dreamerv3-torch/data/log"
   traindir: null
   evaldir: null
   offline_traindir: ''
@@ -20,7 +20,8 @@ defaults:
   video_pred_log: True
 
   # Environment
-  task: 'dmc_walker_walk'
+  # task: 'dmc_walker_walk'
+  task: 'atari_ALE/Alien-v5'
   size: [64, 64]
   envs: 1
   action_repeat: 2

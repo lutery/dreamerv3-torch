@@ -27,14 +27,31 @@ class RewardEMA:
 
 
 class WorldModel(nn.Module):
+    '''
+    dreamerv3 世界模型
+    '''
     def __init__(self, obs_space, act_space, step, config):
+        '''
+        param obs_space: dict, 观测空间
+        param act_space: dict, 动作空间
+        param step: int, 获取预热缓冲区的实际执行的步数
+        param config: dict, 配置
+        '''
+
         super(WorldModel, self).__init__()
         self._step = step
         self._use_amp = True if config.precision == 16 else False
         self._config = config
+        '''
+        "image": gym.spaces.Box(0, 255, img_shape, np.uint8),
+        => "image": (3, 64, 64)
+        '''
         shapes = {k: tuple(v.shape) for k, v in obs_space.spaces.items()}
+        # 构建特征编码层
         self.encoder = networks.MultiEncoder(shapes, **config.encoder)
+        # 获取特征编码层输出的维度，作为特征编码后的向量维度
         self.embed_size = self.encoder.outdim
+        # 构建RSSM
         self.dynamics = networks.RSSM(
             config.dyn_stoch,
             config.dyn_deter,
@@ -53,6 +70,7 @@ class WorldModel(nn.Module):
             config.device,
         )
         self.heads = nn.ModuleDict()
+        # todo 结合实际的数据流向，搞清楚输入的时什么
         if config.dyn_discrete:
             feat_size = config.dyn_stoch * config.dyn_discrete + config.dyn_deter
         else:

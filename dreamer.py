@@ -20,6 +20,10 @@ from parallel import Parallel, Damy
 import torch
 from torch import nn
 from torch import distributions as torchd
+import ale_py
+import gymnasium as gym
+
+gym.register_envs(ale_py)
 
 
 to_np = lambda x: x.detach().cpu().numpy()
@@ -32,24 +36,24 @@ class Dreamer(nn.Module):
         param act_space: 动作空间
         param config: 配置文件
         param logger: 日志
-        param dataset: 数据集
+        param dataset: 数据集，字典类型，包含多个 episode 的数据
         '''
 
         super(Dreamer, self).__init__()
         self._config = config
         self._logger = logger
         self._should_log = tools.Every(config.log_every)
-        batch_steps = config.batch_size * config.batch_length
+        batch_steps = config.batch_size * config.batch_length # 这里就是数据的总长度
         self._should_train = tools.Every(batch_steps / config.train_ratio)
         self._should_pretrain = tools.Once()
         self._should_reset = tools.Every(config.reset_every)
         self._should_expl = tools.Until(int(config.expl_until / config.action_repeat))
         self._metrics = {}
         # this is update step
-        self._step = logger.step // config.action_repeat
+        self._step = logger.step // config.action_repeat # 得到
         self._update_count = 0
         self._dataset = dataset
-        self._wm = models.WorldModel(obs_space, act_space, self._step, config)
+        self._wm = models.WorldModel(obs_space, act_space, self._step, config) # 构建世界模型
         self._task_behavior = models.ImagBehavior(config, self._wm)
         if (
             config.compile and os.name != "nt"
@@ -338,6 +342,19 @@ def main(config):
     train_dataset = make_dataset(train_eps, config)
     # 一开始评估数据集是空的，后续逐步填充
     eval_dataset = make_dataset(eval_eps, config)
+    '''
+    atari下
+    observation_space: 
+    gym.spaces.Dict(
+            {
+                "image": gym.spaces.Box(0, 255, img_shape, np.uint8),
+            }
+
+    action_space:
+    space = self._env.action_space
+        space.discrete = True
+        return space
+    '''
     agent = Dreamer(
         train_envs[0].observation_space,
         train_envs[0].action_space,
@@ -395,7 +412,7 @@ def main(config):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--configs", nargs="+")
+    parser.add_argument("--configs", nargs="+", default='atari100k')
     '''
     args 包含解析后的命令行参数，通常是一个命名空间对象，其中属性名对应参数名，属性值对应参数值。
     remaining 包含未被解析的命令行参数列表。
@@ -415,7 +432,7 @@ if __name__ == "__main__":
                 base[key] = value
 
     # 加载默认配置文件和指定的配置文件，并将它们合并到一个字典中。
-    name_list = ["defaults", *args.configs] if args.configs else ["defaults"]
+    name_list = ["defaults", args.configs] if args.configs else ["defaults"]
     defaults = {}
     for name in name_list:
         recursive_update(defaults, configs[name])
