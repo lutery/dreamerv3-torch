@@ -44,23 +44,30 @@ class Dreamer(nn.Module):
         self._logger = logger
         self._should_log = tools.Every(config.log_every)
         batch_steps = config.batch_size * config.batch_length # 这里就是数据的总长度
-        self._should_train = tools.Every(batch_steps / config.train_ratio)
-        self._should_pretrain = tools.Once()
+        self._should_train = tools.Every(batch_steps / config.train_ratio) # 按照默认的参数来算，batch_steps / config.train_ratio = 2，这里是在计算模型应多久执行一次训练更新
+        # 也就是保证模型会充分利用已有的数据进行训练，稳定后再收集新的环境数据进行训练
+        self._should_pretrain = tools.Once() # # 如果是继续训练，这里会将shoule_pretrain设置为False
         self._should_reset = tools.Every(config.reset_every)
         self._should_expl = tools.Until(int(config.expl_until / config.action_repeat))
         self._metrics = {}
         # this is update step
-        self._step = logger.step // config.action_repeat # 得到
+        self._step = logger.step // config.action_repeat # 得到实际执行的步数，因为会有重复执行步数的操作
         self._update_count = 0
         self._dataset = dataset
+        # 完成构建世界模型
         self._wm = models.WorldModel(obs_space, act_space, self._step, config) # 构建世界模型
+        # 构建动作 价值预测网络
         self._task_behavior = models.ImagBehavior(config, self._wm)
         if (
             config.compile and os.name != "nt"
         ):  # compilation is not supported on windows
+            # 预编译模型，提高运行效率，对dreamerv3不是必备的
             self._wm = torch.compile(self._wm)
             self._task_behavior = torch.compile(self._task_behavior)
         reward = lambda f, s, a: self._wm.heads["reward"](f).mean()
+        # 感觉这里在构建探索模型
+        # config.expl_behavior = greedy
+        # [config.expl_behavior]().to(self._config.device)迁移到指定的设备运行
         self._expl_behavior = dict(
             greedy=lambda: self._task_behavior,
             random=lambda: expl.Random(config, act_space),
@@ -68,14 +75,22 @@ class Dreamer(nn.Module):
         )[config.expl_behavior]().to(self._config.device)
 
     def __call__(self, obs, reset, state=None, training=True):
+        ''''
+        param obs: 环境观察
+        param reset: 是否重置,是否结束
+        '''
         step = self._step
         if training:
+            # 训练模式
+            # 如果是初始训练，那么steps=self._config.pretrain,如果是中断继续训练，那么steps=self._should_train(step)
             steps = (
                 self._config.pretrain
                 if self._should_pretrain()
                 else self._should_train(step)
             )
+            # 训练模型
             for _ in range(steps):
+                # todo self._dataset中的数据是在什么时候填充的
                 self._train(next(self._dataset))
                 self._update_count += 1
                 self._metrics["update_count"] = self._update_count
@@ -127,13 +142,20 @@ class Dreamer(nn.Module):
         return policy_output, state
 
     def _train(self, data):
+        '''
+        训练模型
+        param data: 字典类型，key是states,actions,rewards,next_states,dones， value时对应的数据,batch size, batch length, obs/act space/reward
+        '''
         metrics = {}
+        # 完成世界模型的训练
         post, context, mets = self._wm._train(data)
         metrics.update(mets)
         start = post
+        # 奖励预测
         reward = lambda f, s, a: self._wm.heads["reward"](
             self._wm.dynamics.get_feat(s)
         ).mode()
+        # 训练动作、价值预测网络
         metrics.update(self._task_behavior._train(start, reward)[-1])
         if self._config.expl_behavior != "greedy":
             mets = self._expl_behavior.train(start, context, data)[-1]
@@ -362,18 +384,24 @@ def main(config):
         logger,
         train_dataset,
     ).to(config.device)
+    # 这里是将所有的模型梯度都关闭吗 todo
     agent.requires_grad_(requires_grad=False)
     if (logdir / "latest.pt").exists():
         checkpoint = torch.load(logdir / "latest.pt")
+        # 模型的网络加载权重
         agent.load_state_dict(checkpoint["agent_state_dict"])
+        # 模型的优化器加载保存
         tools.recursively_load_optim_state_dict(agent, checkpoint["optims_state_dict"])
+        # 如果是继续训练，这里会将shoule_pretrain设置为False
         agent._should_pretrain._once = False
 
     # make sure eval will be executed once after config.steps
     while agent._step < config.steps + config.eval_every:
+        # 代理器能够训练的步数
         logger.write()
         if config.eval_episode_num > 0:
             print("Start evaluation.")
+            # 评估，每次评估都会将运行的预测游戏画面保存到日志中
             eval_policy = functools.partial(agent, training=False)
             tools.simulate(
                 eval_policy,
@@ -384,10 +412,12 @@ def main(config):
                 is_eval=True,
                 episodes=config.eval_episode_num,
             )
+            # todo 实现记录视频日志
             if config.video_pred_log:
                 video_pred = agent._wm.video_pred(next(eval_dataset))
                 logger.video("eval_openl", to_np(video_pred))
         print("Start training.")
+        # 训练
         state = tools.simulate(
             agent,
             train_envs,

@@ -352,13 +352,15 @@ def save_episodes(directory, episodes):
 
 def from_generator(generator, batch_size):
     '''
-    yield: 返回合并后的数据，合并后还是字典类型
+    yield: 返回合并后的数据，合并后还是字典类型, key是reward, discount, action等,value是一个batch_size, batch_length, obs/action/reward的数据
     '''
 
     while True:
         batch = []
         # generator每次返回batch_length个长度的数据
         # 总共循环batch_size次，每次取出batch_length个数据
+        # 这里的batch_length相当于之前的l，也就是连续时间上的数据
+        # 而batch_size就是随机从环境中取出的数据
         for _ in range(batch_size):
             batch.append(next(generator))
         data = {}
@@ -367,6 +369,7 @@ def from_generator(generator, batch_size):
             data[key] = []
             # 将所有数据的key的数据取出来，组成一个batch_size * batch_length的数据
             # todo 注意is_first这个特点
+            # 返回的数据应该是b l h w c的形式
             for i in range(batch_size):
                 data[key].append(batch[i][key])
             data[key] = np.stack(data[key], 0)
@@ -862,21 +865,40 @@ def args_type(default):
 
 
 def static_scan(fn, inputs, start):
+    '''
+    param fn: 一个函数，用于处理每一步的数据
+    param inputs: 一个列表（action动作, embed环境特征编码, is_first），包含了所有的数据，每个数据都是一个tensor
+    param start: 一个tensor，表示初始状态，在训练时这里时None，也就是上一个后验状态
+
+    return 返回收集到的每一步的后验状态和先验状态
+    '''
+
     last = start
+    # 因为之前交换了维度，所以这里的indices时按照时间维度来的
     indices = range(inputs[0].shape[0])
-    flag = True
+    flag = True 
     for index in indices:
+    # 遍历每一个时间步
+        # 按照action,embed,is_first顺序这些数据的当前时间步的数据
         inp = lambda x: (_input[x] for _input in inputs)
+        # 返回的last包含后验，先验状态
+        # 后验包含 {"stoch": stoch, "deter": prior["deter"], {"mean": mean, "std": std}或logit}
+        # 先验包含包含logit、deter、stoch或者mean、std、stoch、deter
         last = fn(last, *inp(index))
         if flag:
+            # 第一次会进来
             if type(last) == type({}):
+                # 第一次不会进来 todo 什么时候回进来
                 outputs = {
                     key: value.clone().unsqueeze(0) for key, value in last.items()
                 }
             else:
+                # 第一次会进来
                 outputs = []
+                # 根据obs_step，遍历的是后验和先验的状态
                 for _last in last:
                     if type(_last) == type({}):
+                        # 第一次不会进来 todo 什么时候回进来
                         outputs.append(
                             {
                                 key: value.clone().unsqueeze(0)
@@ -884,15 +906,20 @@ def static_scan(fn, inputs, start):
                             }
                         )
                     else:
+                        # 克隆后验和先验的状态存储到outputs中
                         outputs.append(_last.clone().unsqueeze(0))
+            # 第一次进来后，flag置为False
             flag = False
         else:
+            # 后续都到这里
             if type(last) == type({}):
+                #  todo 什么时候回进来
                 for key in last.keys():
                     outputs[key] = torch.cat(
                         [outputs[key], last[key].unsqueeze(0)], dim=0
                     )
             else:
+                # 遍历搜集到的后验和先验的状态
                 for j in range(len(outputs)):
                     if type(last[j]) == type({}):
                         for key in last[j].keys():
@@ -900,10 +927,12 @@ def static_scan(fn, inputs, start):
                                 [outputs[j][key], last[j][key].unsqueeze(0)], dim=0
                             )
                     else:
+                        # todo 这里是将后续的后验和先验的状态对应合并在一起然后存储到outputs中吗
                         outputs[j] = torch.cat(
                             [outputs[j], last[j].unsqueeze(0)], dim=0
                         )
     if type(last) == type({}):
+        # todo  todo 什么时候回进来
         outputs = [outputs]
     return outputs
 
@@ -1061,6 +1090,7 @@ def recursively_collect_optim_state_dict(
 
 
 def recursively_load_optim_state_dict(obj, optimizers_state_dicts):
+    # 看起来optimizers_state_dicts是以优化器的名字和权重的值成对存储
     for path, state_dict in optimizers_state_dicts.items():
         keys = path.split(".")
         obj_now = obj

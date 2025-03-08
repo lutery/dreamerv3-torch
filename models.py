@@ -60,7 +60,7 @@ class WorldModel(nn.Module):
             config.dyn_discrete,
             config.act,
             config.norm,
-            config.dyn_mean_act,
+            config.dyn_mean_act, 
             config.dyn_std_act,
             config.dyn_min_std,
             config.unimix_ratio,
@@ -75,9 +75,16 @@ class WorldModel(nn.Module):
             feat_size = config.dyn_stoch * config.dyn_discrete + config.dyn_deter
         else:
             feat_size = config.dyn_stoch + config.dyn_deter
+        # 解码层，解码层的输入是RSSM的输出
+        '''
+        "image": gym.spaces.Box(0, 255, img_shape, np.uint8),
+        => "image": (64, 64， 3)
+        观察空间解码
+        '''
         self.heads["decoder"] = networks.MultiDecoder(
             feat_size, shapes, **config.decoder
         )
+        # 奖励解码
         self.heads["reward"] = networks.MLP(
             feat_size,
             (255,) if config.reward_head["dist"] == "symlog_disc" else (),
@@ -90,6 +97,23 @@ class WorldModel(nn.Module):
             device=config.device,
             name="Reward",
         )
+        # todo 表示环境是否继续的标识，在 DreamerV3 算法中，cont 是一个用于表示环境中是否继续的标志（continuation flag）。它通常用于处理非终止状态（non-terminal states）和终止状态（terminal states），并在训练过程中用于计算折扣因子（discount factor）
+        '''
+        详细解释
+        cont 的作用
+        表示非终止状态：
+
+        cont 是一个二进制标志，用于表示当前状态是否为非终止状态。
+        如果 cont 为 1，表示当前状态是非终止状态。
+        如果 cont 为 0，表示当前状态是终止状态。
+        计算折扣因子：
+
+        在强化学习中，折扣因子用于计算未来奖励的现值。cont 用于调整折扣因子，以便在终止状态时停止累积奖励。
+        例如，如果 cont 为 0，则折扣因子将被设置为 0，从而停止累积未来奖励。
+        训练过程中的使用：
+
+        在训练过程中，cont 被用于计算损失函数和目标值。它确保模型在终止状态时不会继续累积奖励，从而提高训练的稳定性和效果
+        '''
         self.heads["cont"] = networks.MLP(
             feat_size,
             (),
@@ -104,6 +128,8 @@ class WorldModel(nn.Module):
         )
         for name in config.grad_heads:
             assert name in self.heads, name
+
+        # 这个优化器应该是优化在这个世界模型类里面定义的所有子模型参数
         self._model_opt = tools.Optimizer(
             "model",
             self.parameters(),
@@ -118,6 +144,7 @@ class WorldModel(nn.Module):
             f"Optimizer model_opt has {sum(param.numel() for param in self.parameters())} variables."
         )
         # other losses are scaled by 1.0.
+        # todo 这个是缩放到时候的对应的损失吗
         self._scales = dict(
             reward=config.reward_head["loss_scale"],
             cont=config.cont_head["loss_scale"],
@@ -129,25 +156,36 @@ class WorldModel(nn.Module):
         # reward (batch_size, batch_length)
         # discount (batch_size, batch_length)
         data = self.preprocess(data)
+        # 处理完成后，data还是一个字典类型，key时action\image\discount\cont\is_first\is_terminal这些
 
         with tools.RequiresGrad(self):
-            with torch.cuda.amp.autocast(self._use_amp):
+            with torch.amp.autocast('cuda', self._use_amp):
+                # embed shape = (batch_size, batch_length, embed_size)
                 embed = self.encoder(data)
+                # 获取先验和后验概率
                 post, prior = self.dynamics.observe(
                     embed, data["action"], data["is_first"]
                 )
                 kl_free = self._config.kl_free
                 dyn_scale = self._config.dyn_scale
                 rep_scale = self._config.rep_scale
+                # 计算先验和后验的KL散度
                 kl_loss, kl_value, dyn_loss, rep_loss = self.dynamics.kl_loss(
                     post, prior, kl_free, dyn_scale, rep_scale
                 )
                 assert kl_loss.shape == embed.shape[:2], kl_loss.shape
                 preds = {}
+                # 遍历每一个预测头
                 for name, head in self.heads.items():
                     grad_head = name in self._config.grad_heads
+                    # 把后验状态中的随机状态和确定性状态拼接起来
+                    # 后验状态中的deter就是先验的deter
+                    # 而stoch则是结合实际状态编码和先验deter预测得到的动作分布
                     feat = self.dynamics.get_feat(post)
+                    # todo grad_head是什么，从配置可知：'decoder', 'reward', 'cont'都是True
                     feat = feat if grad_head else feat.detach()
+                    # 根据不同的预测头，获取不同的预测结果，比如图像、奖励、是否继续等
+                    # 根据后验特征获取每一步预测的结果
                     pred = head(feat)
                     if type(pred) is dict:
                         preds.update(pred)
@@ -186,23 +224,54 @@ class WorldModel(nn.Module):
                 postent=self.dynamics.get_dist(post).entropy(),
             )
         post = {k: v.detach() for k, v in post.items()}
+        # 后验状态，一些上下文信息，一些度量信息
         return post, context, metrics
 
     # this function is called during both rollout and training
     def preprocess(self, obs):
+        '''
+        对像素数据进行预处理，归一化为0-1之间的数值
+        '''
+        # 1. 转换为tensor
         obs = {
             k: torch.tensor(v, device=self._config.device, dtype=torch.float32)
             for k, v in obs.items()
         }
+        # 2. 归一化
         obs["image"] = obs["image"] / 255.0
         if "discount" in obs:
+            '''
+            Collecting workspace information在 DreamerV3 的代码中，对于 Atari 游戏环境，discount 值是在 atari.py 中收集的。在世界模型的 `preprocess` 函数中可以看到对 discount 的处理：
+
+            ````python
+            if "discount" in obs:
+                # 如果环境有折扣那么就乘以折扣
+                obs["discount"] *= self._config.discount
+                # (batch_size, batch_length) -> (batch_size, batch_length, 1)
+                obs["discount"] = obs["discount"].unsqueeze(-1)
+            ````
+
+            折扣因子有两个作用:
+
+            1. 作为奖励的折扣系数，用于计算长期回报
+            2. 用于处理游戏终止状态，当环境结束时 discount=0，否则为 1
+
+            在 Atari 环境中:
+            - 非终止状态: discount = 1 
+            - 终止状态 (游戏结束): discount = 0
+
+            这样可以帮助模型区分游戏的终止和非终止状态，并正确计算长期回报。
+            '''
+            # 如果环境有折扣那么就乘以折扣
             obs["discount"] *= self._config.discount
             # (batch_size, batch_length) -> (batch_size, batch_length, 1)
             obs["discount"] = obs["discount"].unsqueeze(-1)
         # 'is_first' is necesarry to initialize hidden state at training
+        # 在收集观察时，is_first和is_terminal是必要的
         assert "is_first" in obs
         # 'is_terminal' is necesarry to train cont_head
         assert "is_terminal" in obs
+        # 得到cont，congt时是否结束的标志的反转，即是否继续，cont表示continuation flag
         obs["cont"] = (1.0 - obs["is_terminal"]).unsqueeze(-1)
         return obs
 
@@ -232,6 +301,15 @@ class WorldModel(nn.Module):
 
 class ImagBehavior(nn.Module):
     def __init__(self, config, world_model):
+        '''
+        这个类就就是在预测动作和值
+        todo 搞清楚传入的数据有哪些
+
+          actor:
+            {layers: 2, dist: 'normal', entropy: 3e-4, unimix_ratio: 0.01, std: 'learned', min_std: 0.1, max_std: 1.0, temp: 0.1, lr: 3e-5, eps: 1e-5, grad_clip: 100.0, outscale: 1.0}
+        critic:
+            {layers: 2, dist: 'symlog_disc', slow_target: True, slow_target_update: 1, slow_target_fraction: 0.02, lr: 3e-5, eps: 1e-5, grad_clip: 100.0, outscale: 0.0}
+        '''
         super(ImagBehavior, self).__init__()
         self._use_amp = True if config.precision == 16 else False
         self._config = config
@@ -240,6 +318,7 @@ class ImagBehavior(nn.Module):
             feat_size = config.dyn_stoch * config.dyn_discrete + config.dyn_deter
         else:
             feat_size = config.dyn_stoch + config.dyn_deter
+        # todo 到时候写代码时，要把这个MLP层分开使用
         self.actor = networks.MLP(
             feat_size,
             (config.num_actions,),
@@ -257,6 +336,7 @@ class ImagBehavior(nn.Module):
             outscale=config.actor["outscale"],
             name="Actor",
         )
+        # 价值预测
         self.value = networks.MLP(
             feat_size,
             (255,) if config.critic["dist"] == "symlog_disc" else (),
@@ -269,10 +349,12 @@ class ImagBehavior(nn.Module):
             device=config.device,
             name="Value",
         )
+        # 价值网络有一个TargetNet
         if config.critic["slow_target"]:
             self._slow_value = copy.deepcopy(self.value)
             self._updates = 0
         kw = dict(wd=config.weight_decay, opt=config.opt, use_amp=self._use_amp)
+        # 动作优化器
         self._actor_opt = tools.Optimizer(
             "actor",
             self.actor.parameters(),
@@ -284,6 +366,7 @@ class ImagBehavior(nn.Module):
         print(
             f"Optimizer actor_opt has {sum(param.numel() for param in self.actor.parameters())} variables."
         )
+        # 价值优化器
         self._value_opt = tools.Optimizer(
             "value",
             self.value.parameters(),
@@ -296,6 +379,7 @@ class ImagBehavior(nn.Module):
             f"Optimizer value_opt has {sum(param.numel() for param in self.value.parameters())} variables."
         )
         if self._config.reward_EMA:
+            # todo 这部分是在做什么
             # register ema_vals to nn.Module for enabling torch.save and torch.load
             self.register_buffer(
                 "ema_vals", torch.zeros((2,), device=self._config.device)
@@ -307,11 +391,17 @@ class ImagBehavior(nn.Module):
         start,
         objective,
     ):
+        '''
+        start: 后验状态
+        objective: 奖励预测函数
+        '''
+        # 每次训练时，更新一次价值目标网络
         self._update_slow_target()
         metrics = {}
 
         with tools.RequiresGrad(self.actor):
             with torch.cuda.amp.autocast(self._use_amp):
+                # self._config.imag_horizon参数的作用
                 imag_feat, imag_state, imag_action = self._imagine(
                     start, self.actor, self._config.imag_horizon
                 )
@@ -364,8 +454,15 @@ class ImagBehavior(nn.Module):
         return imag_feat, imag_state, imag_action, weights, metrics
 
     def _imagine(self, start, policy, horizon):
+        '''
+        param start: 后验状态
+        param policy: 动作策略
+        param horizon: todo 这个参数是什么
+        '''
+        # rssm模型
         dynamics = self._world_model.dynamics
         flatten = lambda x: x.reshape([-1] + list(x.shape[2:]))
+        # 展品后验状态的前两个维度，也就是batch_size和batch_length
         start = {k: flatten(v) for k, v in start.items()}
 
         def step(prev, _):
@@ -376,6 +473,7 @@ class ImagBehavior(nn.Module):
             succ = dynamics.img_step(state, action)
             return succ, feat, action
 
+        # 遍历每一个时间步，获取每一个时间步的特征、状态和动作
         succ, feats, actions = tools.static_scan(
             step, [torch.arange(horizon)], (start, None, None)
         )

@@ -24,7 +24,7 @@ class RSSM(nn.Module):
         discrete=False,
         act="SiLU",
         norm=True,
-        mean_act="none",
+        mean_act="none", # 默认参数是none
         std_act="softplus",
         min_std=0.1,
         unimix_ratio=0.01,
@@ -38,8 +38,8 @@ class RSSM(nn.Module):
         self._deter = deter
         self._hidden = hidden
         self._min_std = min_std
-        self._rec_depth = rec_depth
-        self._discrete = discrete # 状态的表示方式，是连续的还是离散的
+        self._rec_depth = rec_depth # 在 DreamerV3 的 RSSM (Recurrent State-Space Model) 中，rec_depth 参数用于控制 GRU（Gated Recurrent Unit）循环的深度。具体来说，它决定了在一个时间步内 GRU 单元重复处理特征的次数。
+        self._discrete = discrete # 动作的表示方式，是连续的还是离散的
         act = getattr(torch.nn, act)
         self._mean_act = mean_act
         self._std_act = std_act
@@ -56,6 +56,7 @@ class RSSM(nn.Module):
             inp_dim = self._stoch + num_actions
         # todo 看实际输入时，具体时什么数据传入的
         # 看起来是将随机特征编码和动作拼接在一起进行特征菜样，应该是先验状态特征吧
+        # 采集先验状态和动作，然后将其映射到隐藏层
         inp_layers.append(nn.Linear(inp_dim, self._hidden, bias=False))
         if norm:
             inp_layers.append(nn.LayerNorm(self._hidden, eps=1e-03))
@@ -73,6 +74,7 @@ class RSSM(nn.Module):
         if norm:
             img_out_layers.append(nn.LayerNorm(self._hidden, eps=1e-03))
         img_out_layers.append(act())
+        # 传入确定性状态特征编码，输出随机特征编码
         self._img_out_layers = nn.Sequential(*img_out_layers)
         self._img_out_layers.apply(tools.weight_init)
 
@@ -113,8 +115,18 @@ class RSSM(nn.Module):
         # todo 注释上面这么多网络的数据流动
 
     def initial(self, batch_size):
+        '''
+        初始化先验状态特征编码，初始化的时候，这里就是batch_size，因为此时处于每一个时间步遍历的时候
+        '''
+        # 这里构建的是一个不可学习的确定性状态
         deter = torch.zeros(batch_size, self._deter, device=self._device)
+        # 接下来分离散和连续环境两种情况
         if self._discrete:
+            '''
+            logit: 随机特征编码，shape = (batch_size, stoch, discrete_num)
+            stoch: 随机特征编码，shape = (batch_size, stoch, discrete_num)
+            deter: 确定性状态特征编码，shape = (batch_size, deter)
+            '''
             state = dict(
                 logit=torch.zeros(
                     [batch_size, self._stoch, self._discrete], device=self._device
@@ -125,22 +137,39 @@ class RSSM(nn.Module):
                 deter=deter,
             )
         else:
+            '''
+            mean: 均值，shape = (batch_size, stoch)
+            std: 方差，shape = (batch_size, stoch)
+            stoch: 随机特征编码，shape = (batch_size, stoch)
+            deter: 确定性状态特征编码，shape = (batch_size, deter)
+            '''
             state = dict(
                 mean=torch.zeros([batch_size, self._stoch], device=self._device),
                 std=torch.zeros([batch_size, self._stoch], device=self._device),
                 stoch=torch.zeros([batch_size, self._stoch], device=self._device),
                 deter=deter,
             )
+        # 按照默认参数来看，这里应该时learned   
         if self._initial == "zeros":
             return state
         elif self._initial == "learned":
+            # 这里将确定性状态特征编码设置为一个可学习的参数
+            # shape = (batch_size, deter)
             state["deter"] = torch.tanh(self.W).repeat(batch_size, 1)
+            # 这里根据可以学习的参数来计算随机特征编码,这个随机状态编码和预测的动作有很大的关系
             state["stoch"] = self.get_stoch(state["deter"])
             return state
         else:
             raise NotImplementedError(self._initial)
 
     def observe(self, embed, action, is_first, state=None):
+        '''
+        param embed: 特征采样的输出
+        param action: 动作
+        param is_first: 是否是第一次，一般时reset后
+        param state: 先验状态特征编码，在训练时是None
+        '''
+        # swap 交换维度，也就是batch time ch -> time batch ch
         swap = lambda x: x.permute([1, 0] + list(range(2, len(x.shape))))
         # (batch, time, ch) -> (time, batch, ch)
         embed, action, is_first = swap(embed), swap(action), swap(is_first)
@@ -153,7 +182,7 @@ class RSSM(nn.Module):
             (state, state),
         )
 
-        # (batch, time, stoch, discrete_num) -> (batch, time, stoch, discrete_num)
+        # (time, batch, stoch, discrete_num) -> (batch, time, stoch, discrete_num)
         post = {k: swap(v) for k, v in post.items()}
         prior = {k: swap(v) for k, v in prior.items()}
         return post, prior
@@ -175,6 +204,7 @@ class RSSM(nn.Module):
         return torch.cat([stoch, state["deter"]], -1)
 
     def get_dist(self, state, dtype=None):
+        # 根据动作时连续还是离散来获取分布，所以我认为_discrete是一个标志位，标识动作时连续还是离散
         if self._discrete:
             logit = state["logit"]
             dist = torchd.independent.Independent(
@@ -188,40 +218,70 @@ class RSSM(nn.Module):
         return dist
 
     def obs_step(self, prev_state, prev_action, embed, is_first, sample=True):
+        '''
+        param prev_state: 先验状态特征编码,第一个时None，可能包含 'deter'、'stoch'、'mean'、'std' 等状态
+        param prev_action: 动作
+        param embed: 环境观察特征采样的输出
+        param is_first: 是否是第一次，一般时reset后或者第一次
+        '''
         # initialize all prev_state
         if prev_state == None or torch.sum(is_first) == len(is_first):
+            # 如果时第一次，那么就初始化
+            # 初始化状态特征编码，包含logit、deter、stoch或者mean、std、stoch、deter
             prev_state = self.initial(len(is_first))
+            # shape = (batch_size, num_actions)
             prev_action = torch.zeros(
                 (len(is_first), self._num_actions), device=self._device
             )
         # overwrite the prev_state only where is_first=True
         elif torch.sum(is_first) > 0:
+            # 如果存在reset的情况
             is_first = is_first[:, None]
+            # 将prev_action设置为0，应该是重置了，之前的动作不再有意义
             prev_action *= 1.0 - is_first
+            # 初始化状态特征编码
             init_state = self.initial(len(is_first))
+            # 遍历前一个状态字典中的所有键值对
+            # 可能包含 'deter'、'stoch'、'mean'、'std' 等状态
             for key, val in prev_state.items():
+                # 将 is_first 张量的形状扩展以匹配状态值的形状
+                # 通过添加适当数量的单位维度实现广播
                 is_first_r = torch.reshape(
                     is_first,
                     is_first.shape + (1,) * (len(val.shape) - len(is_first.shape)),
                 )
+                # val * (1.0 - is_first_r): 保持未重置环境的原有状态
+                # init_state[key] * is_first_r: 对重置的环境使用初始状态，因为is_first_r为false时是0
+                # 两者相加实现选择性更新
                 prev_state[key] = (
                     val * (1.0 - is_first_r) + init_state[key] * is_first_r
                 )
 
+        # 前一个状态+前一个动作，获取先验状态
+        # todo prev_state来自上一次的后验状态
         prior = self.img_step(prev_state, prev_action)
         x = torch.cat([prior["deter"], embed], -1)
         # (batch_size, prior_deter + embed) -> (batch_size, hidden)
+        # 结合先验状态特征编码和环境观察特征采样的输出，提取特征
         x = self._obs_out_layers(x)
         # (batch_size, hidden) -> (batch_size, stoch, discrete_num)
+        # 根据实际观察特征预测动作的分布
         stats = self._suff_stats_layer("obs", x)
         if sample:
             stoch = self.get_dist(stats).sample()
         else:
             stoch = self.get_dist(stats).mode()
+        # 获取后验状态
         post = {"stoch": stoch, "deter": prior["deter"], **stats}
+        # 返回后验状态和先验状态，这里和之前一样，后验状态包含本次的环境状态，而先验没有，只有动作和上一次的先验状态
         return post, prior
 
     def img_step(self, prev_state, prev_action, sample=True):
+        '''
+        param prev_state: 先验状态特征编码
+        param prev_action: 动作
+        '''
+
         # (batch, stoch, discrete_num)
         prev_stoch = prev_state["stoch"]
         if self._discrete:
@@ -240,38 +300,59 @@ class RSSM(nn.Module):
         # (batch, deter) -> (batch, hidden)
         x = self._img_out_layers(x)
         # (batch, hidden) -> (batch_size, stoch, discrete_num)
+        # 根据离散和连续环境获取不同的输出
+        # 根据连续状态预测动作的分布
         stats = self._suff_stats_layer("ims", x)
+        # 根据sample来决定是采样还是最大概率，默认是true，可能测试时是False
         if sample:
             stoch = self.get_dist(stats).sample()
         else:
             stoch = self.get_dist(stats).mode()
+        # 先验状态特征编码
+        # stoch：来自上一个状态和上一次的动作预测输出
+        # deter：来自上一个状态的确定性特征编码经过GRU处理后的输出
+        # stats：预测的动作分布
         prior = {"stoch": stoch, "deter": deter, **stats}
         return prior
 
     def get_stoch(self, deter):
+        # 采集确定性特征编码特征
         x = self._img_out_layers(deter)
+        # imgs应该时想象吧 todo，如果是在训练遍历每一时间步时
+        # 返回预测的动作分布
         stats = self._suff_stats_layer("ims", x)
         dist = self.get_dist(stats)
+        # 方法是用于获取分布的最可能值（众数）
+        # # 连续分布的众数就是均值
+        #  # 离散分布的众数是最大概率的类别
+        # 更多查看readme
         return dist.mode()
 
     def _suff_stats_layer(self, name, x):
         if self._discrete:
+            # 离散环境
             if name == "ims":
+                # 输入的是img_out_layers层的输出
                 x = self._imgs_stat_layer(x)
             elif name == "obs":
+                # todo 确定这里哪里输入的
                 x = self._obs_stat_layer(x)
             else:
                 raise NotImplementedError
+            # 获取离散环境下的动作预测
             logit = x.reshape(list(x.shape[:-1]) + [self._stoch, self._discrete])
             return {"logit": logit}
         else:
+            # 连续环境
             if name == "ims":
                 x = self._imgs_stat_layer(x)
             elif name == "obs":
                 x = self._obs_stat_layer(x)
             else:
                 raise NotImplementedError
+            #获取连续环境下的均值和方差
             mean, std = torch.split(x, [self._stoch] * 2, -1)
+            # 这里的动作查看reamdme
             mean = {
                 "none": lambda: mean,
                 "tanh5": lambda: 5.0 * torch.tanh(mean / 5.0),
@@ -283,6 +364,7 @@ class RSSM(nn.Module):
                 "sigmoid2": lambda: 2 * torch.sigmoid(std / 2),
             }[self._std_act]()
             std = std + self._min_std
+            # 返回预测的均值和方差
             return {"mean": mean, "std": std}
 
     def kl_loss(self, post, prior, free, dyn_scale, rep_scale):
@@ -388,7 +470,10 @@ class MultiEncoder(nn.Module):
     def forward(self, obs):
         outputs = []
         if self.cnn_shapes:
+            # cnn_shapes中只有images，所以这里时提取图像特征，并将所有图像特征拼接在一起，之前的stack还知识np.stack的，这里应该也是转换为了tensor
+            # shape = (batch, time, h, w, ch)
             inputs = torch.cat([obs[k] for k in self.cnn_shapes], -1)
+            # 经过_cnn后，输出的时b t embed_size
             outputs.append(self._cnn(inputs))
         if self.mlp_shapes:
             inputs = torch.cat([obs[k] for k in self.mlp_shapes], -1)
@@ -416,12 +501,21 @@ class MultiDecoder(nn.Module):
         vector_dist,
         outscale,
     ):
+        '''
+        参数可参考config文件
+        {mlp_keys: '$^', cnn_keys: 'image', act: 'SiLU', norm: True, cnn_depth: 32, kernel_size: 4, minres: 4, mlp_layers: 5, mlp_units: 1024, cnn_sigmoid: False, image_dist: mse, vector_dist: symlog_mse, outscale: 1.0}
+        解码层，卷积就是上菜样，mlp就是上菜样到内存映射
+        '''
+
         super(MultiDecoder, self).__init__()
         excluded = ("is_first", "is_last", "is_terminal")
+        # 这里应该是保证去除其他多余的键值
         shapes = {k: v for k, v in shapes.items() if k not in excluded}
+        # "image": (64, 64， 3)
         self.cnn_shapes = {
             k: v for k, v in shapes.items() if len(v) == 3 and re.match(cnn_keys, k)
         }
+        # 在atari中，这里是空的
         self.mlp_shapes = {
             k: v
             for k, v in shapes.items()
@@ -431,6 +525,7 @@ class MultiDecoder(nn.Module):
         print("Decoder MLP shapes:", self.mlp_shapes)
 
         if self.cnn_shapes:
+            # 这里应该是将 64 64 3 这个shape转换为 3 64 64 todo
             some_shape = list(self.cnn_shapes.values())[0]
             shape = (sum(x[-1] for x in self.cnn_shapes.values()),) + some_shape[:-1]
             self._cnn = ConvDecoder(
@@ -543,6 +638,7 @@ class ConvEncoder(nn.Module):
         x = x.permute(0, 3, 1, 2)
         x = self.layers(x)
         # (batch * time, ...) -> (batch * time, -1)
+        # 展平
         x = x.reshape([x.shape[0], np.prod(x.shape[1:])])
         # (batch * time, -1) -> (batch, time, -1)
         return x.reshape(list(obs.shape[:-3]) + [x.shape[-1]])
@@ -561,18 +657,30 @@ class ConvDecoder(nn.Module):
         outscale=1.0,
         cnn_sigmoid=False,
     ):
+        '''
+        卷积解码器，应该是反卷积吧
+
+        这里仅仅只做上菜样
+        '''
+
         super(ConvDecoder, self).__init__()
         act = getattr(torch.nn, act)
         self._shape = shape
         self._cnn_sigmoid = cnn_sigmoid
+        # 这里计算的是从特征编码到最小分辨率的输出尺寸所需要的层数
         layer_num = int(np.log2(shape[1]) - np.log2(minres))
         self._minres = minres
+        # 计算到最小分辨率是的输出通道数
         out_ch = minres**2 * depth * 2 ** (layer_num - 1)
+        # todo embed_size是什么
         self._embed_size = out_ch
 
+        # 将rssm输出的特征编码映射到最小分辨率的输出尺寸
         self._linear_layer = nn.Linear(feat_size, out_ch)
         self._linear_layer.apply(tools.uniform_weight_init(outscale))
+        # 计算每一层的输入输出通道数，由于minres时最小分辨率，所以输入通道数时输出通道数的两倍，因为时h和w
         in_dim = out_ch // (minres**2)
+        # 每经过一层计算，输出通道数减半
         out_dim = in_dim // 2
 
         layers = []
@@ -580,13 +688,18 @@ class ConvDecoder(nn.Module):
         for i in range(layer_num):
             bias = False
             if i == layer_num - 1:
+                # 确保最后一层输出的通道数时3
                 out_dim = self._shape[0]
+                # 不使用激活函数
                 act = False
                 bias = True
+                # 不使用归一化
                 norm = False
 
             if i != 0:
+                # 第一层不需要改变输入输出通道数
                 in_dim = 2 ** (layer_num - (i - 1) - 2) * depth
+            # 这里应该是利用反卷积的公式，计算每次上菜样尺寸翻倍需要填充的大小
             pad_h, outpad_h = self.calc_same_pad(k=kernel_size, s=2, d=1)
             pad_w, outpad_w = self.calc_same_pad(k=kernel_size, s=2, d=1)
             layers.append(
@@ -605,7 +718,9 @@ class ConvDecoder(nn.Module):
             if act:
                 layers.append(act())
             in_dim = out_dim
+            # 每次输出通道数减半
             out_dim //= 2
+            # 每次尺寸翻倍
             h, w = h * 2, w * 2
         [m.apply(tools.weight_init) for m in layers[:-1]]
         layers[-1].apply(tools.uniform_weight_init(outscale))
@@ -658,8 +773,17 @@ class MLP(nn.Module):
         device="cuda",
         name="NoName",
     ):
+        '''
+        传入rssm编码的输出
+        具体参数查看config文件
+
+        shape是空的
+       在世界状态模型和价值模型里面 std的值不会改变
+       但是在动作这个值会改变
+        '''
         super(MLP, self).__init__()
         self._shape = (shape,) if isinstance(shape, int) else shape
+        # 在世界状态模型中，因为在代码中self._shape是()，所以这里会转变为(1,)
         if self._shape is not None and len(self._shape) == 0:
             self._shape = (1,)
         act = getattr(torch.nn, act)
@@ -674,6 +798,7 @@ class MLP(nn.Module):
         self._device = device
 
         self.layers = nn.Sequential()
+        # 构建解码层
         for i in range(layers):
             self.layers.add_module(
                 f"{name}_linear{i}", nn.Linear(inp_dim, units, bias=False)
@@ -699,9 +824,11 @@ class MLP(nn.Module):
                     self.std_layer[name] = nn.Linear(inp_dim, np.prod(shape))
                 self.std_layer.apply(tools.uniform_weight_init(outscale))
         elif self._shape is not None:
+            # 因为时(1,)所以会进入这里
             self.mean_layer = nn.Linear(inp_dim, np.prod(self._shape))
             self.mean_layer.apply(tools.uniform_weight_init(outscale))
             if self._std == "learned":
+                # 在动作预测时，会进入这里，因为要计算均值和方差预测动作
                 assert dist in ("tanh_normal", "normal", "trunc_normal", "huber"), dist
                 self.std_layer = nn.Linear(units, np.prod(self._shape))
                 self.std_layer.apply(tools.uniform_weight_init(outscale))
