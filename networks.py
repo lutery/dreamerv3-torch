@@ -302,6 +302,7 @@ class RSSM(nn.Module):
         # (batch, hidden) -> (batch_size, stoch, discrete_num)
         # 根据离散和连续环境获取不同的输出
         # 根据连续状态预测动作的分布
+        # stats = {"mean": mean, "std": std}或者stats = {"logit": logit}
         stats = self._suff_stats_layer("ims", x)
         # 根据sample来决定是采样还是最大概率，默认是true，可能测试时是False
         if sample:

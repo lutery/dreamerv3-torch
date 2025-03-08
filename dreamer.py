@@ -70,7 +70,7 @@ class Dreamer(nn.Module):
         # [config.expl_behavior]().to(self._config.device)迁移到指定的设备运行
         self._expl_behavior = dict(
             greedy=lambda: self._task_behavior,
-            random=lambda: expl.Random(config, act_space),
+            random=lambda: expl.Random(config, act_space), # 随机探索，train是空的
             plan2explore=lambda: expl.Plan2Explore(config, self._wm, reward),
         )[config.expl_behavior]().to(self._config.device)
 
@@ -94,6 +94,7 @@ class Dreamer(nn.Module):
                 self._train(next(self._dataset))
                 self._update_count += 1
                 self._metrics["update_count"] = self._update_count
+            # 这边应该是记录日志，不太重要 todo 后续增加上记录视频
             if self._should_log(step):
                 for name, values in self._metrics.items():
                     self._logger.scalar(name, float(np.mean(values)))
@@ -103,9 +104,11 @@ class Dreamer(nn.Module):
                     self._logger.video("train_openl", to_np(openl))
                 self._logger.write(fps=True)
 
+        # 这边应该是正常的根据状态预测动作
         policy_output, state = self._policy(obs, state, training)
 
         if training:
+            # 计算执行的步数
             self._step += len(reset)
             self._logger.step = self._config.action_repeat * self._step
         return policy_output, state
@@ -158,6 +161,7 @@ class Dreamer(nn.Module):
         # 训练动作、价值预测网络
         metrics.update(self._task_behavior._train(start, reward)[-1])
         if self._config.expl_behavior != "greedy":
+            # 训练探索模型
             mets = self._expl_behavior.train(start, context, data)[-1]
             metrics.update({"expl_" + key: value for key, value in mets.items()})
         for name, value in metrics.items():

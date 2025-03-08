@@ -405,8 +405,11 @@ class ImagBehavior(nn.Module):
                 imag_feat, imag_state, imag_action = self._imagine(
                     start, self.actor, self._config.imag_horizon
                 )
+                # 将预测的动作和各种状态传入奖励预测函数
                 reward = objective(imag_feat, imag_state, imag_action)
+                # 传入相同的确定性状态和随机状态的结合预测动作的熵
                 actor_ent = self.actor(imag_feat).entropy()
+                # todo 这里好像并没有将state_ent纳入计算，这里也是获取动作的分布
                 state_ent = self._world_model.dynamics.get_dist(imag_state).entropy()
                 # this target is not scaled by ema or sym_log.
                 target, weights, base = self._compute_target(
@@ -455,9 +458,10 @@ class ImagBehavior(nn.Module):
 
     def _imagine(self, start, policy, horizon):
         '''
+        动作想象
         param start: 后验状态
         param policy: 动作策略
-        param horizon: todo 这个参数是什么
+        param horizon: todo 这个参数是什么，好像传入的是一个常量
         '''
         # rssm模型
         dynamics = self._world_model.dynamics
@@ -466,27 +470,41 @@ class ImagBehavior(nn.Module):
         start = {k: flatten(v) for k, v in start.items()}
 
         def step(prev, _):
+            '''
+            prev：后验状态 (start, None, None)
+            '''
             state, _, _ = prev
+            # 提取特征（结合随机性状态和确定性状态）
             feat = dynamics.get_feat(state)
             inp = feat.detach()
+            # 预测执行的动作
             action = policy(inp).sample()
+            # 在这里作为上一个状态和上一个动作，预测到先验状态
             succ = dynamics.img_step(state, action)
             return succ, feat, action
 
         # 遍历每一个时间步，获取每一个时间步的特征、状态和动作
+        # 得到预测的先验状态、特征（结合随机性状态和确定性状态）和动作
         succ, feats, actions = tools.static_scan(
             step, [torch.arange(horizon)], (start, None, None)
         )
+        # 这边好像是将后验状态和预测的先验状态拼接起来
+        # todo 这里拼接的形状
         states = {k: torch.cat([start[k][None], v[:-1]], 0) for k, v in succ.items()}
 
+        # 得到预测的先验状态、特征（结合随机性状态和确定性状态），预测的先验状态和传入的后验状态拼接，预测的动作
         return feats, states, actions
 
     def _compute_target(self, imag_feat, imag_state, reward):
         if "cont" in self._world_model.heads:
+            # 又是获取随机状态和确定性状态的组合
             inp = self._world_model.dynamics.get_feat(imag_state)
+            # 预测折扣
             discount = self._config.discount * self._world_model.heads["cont"](inp).mean
         else:
+            # 如果不包含则直接使用配置的折扣
             discount = self._config.discount * torch.ones_like(reward)
+        # 预测价值
         value = self.value(imag_feat).mode()
         target = tools.lambda_return(
             reward[1:],
@@ -496,6 +514,7 @@ class ImagBehavior(nn.Module):
             lambda_=self._config.discount_lambda,
             axis=0,
         )
+        # 计算折扣因子
         weights = torch.cumprod(
             torch.cat([torch.ones_like(discount[:1]), discount[:-1]], 0), 0
         ).detach()

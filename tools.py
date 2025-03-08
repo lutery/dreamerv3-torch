@@ -741,6 +741,17 @@ class TanhBijector(torchd.Transform):
 
 
 def static_scan_for_lambda_return(fn, inputs, start):
+    '''
+    用于计算 λ-returns，这是一种时序差分学习中的重要概念，用于平衡单步回报和多步回报。
+
+    inputs: 包含两个元素的元组
+
+    inputs[0]: reward + pcont * next_values * (1 - lambda_)
+    inputs[1]: pcont (折扣因子)
+
+    bootstrap: 最后一个状态的价值估计
+    '''
+
     last = start
     indices = range(inputs[0].shape[0])
     indices = reversed(indices)
@@ -781,6 +792,11 @@ def lambda_return(reward, value, pcont, bootstrap, lambda_, axis):
     #    lambda agg, cur0, cur1: cur0 + cur1 * lambda_ * agg,
     #    (inputs, pcont), bootstrap, reverse=True)
     # reimplement to optimize performance
+    # # 例如在 lambda_return 中使用的函数：
+    # lambda agg, cur0, cur1: cur0 + cur1 * lambda_ * agg
+    # agg: 累积的回报
+    # cur0: 当前的即时奖励加上下一个状态的价值估计
+    # cur1: 折扣因子
     returns = static_scan_for_lambda_return(
         lambda agg, cur0, cur1: cur0 + cur1 * lambda_ * agg, (inputs, pcont), bootstrap
     )
@@ -816,7 +832,7 @@ class Optimizer:
             "sgd": lambda: torch.optim.SGD(parameters, lr=lr),
             "momentum": lambda: torch.optim.SGD(parameters, lr=lr, momentum=0.9),
         }[opt]()
-        self._scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+        self._scaler = torch.amp.GradScaler(device='cuda', enabled=use_amp)
 
     def __call__(self, loss, params, retain_graph=True):
         assert len(loss.shape) == 0, loss.shape
