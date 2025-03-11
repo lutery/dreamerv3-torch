@@ -46,7 +46,6 @@ class Atari:
             from PIL import Image
 
             self._image = Image
-        import gym.envs.atari
 
         if name == "james_bond":
             name = "jamesbond"
@@ -59,9 +58,9 @@ class Atari:
         self._length = length
         self._random = np.random.RandomState(seed)
         with self.LOCK:
-            self._env = gym.envs.atari.AtariEnv(
-                game=name, # 游戏名称
-                obs_type="image", # 环境观察类型
+            self._env = gym.make(
+                id=name, # 游戏名称
+                obs_type="rgb", # 环境观察类型
                 frameskip=1, # 不跳帧
                 repeat_action_probability=0.25 if sticky else 0.0, # 可配置是否粘性动作
                 full_action_space=(actions == "all"), # 是否使用所有动作
