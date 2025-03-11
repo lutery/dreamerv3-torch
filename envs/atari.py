@@ -9,6 +9,7 @@ import numpy as np
 # 5. 多帧最大值合并
 # 6. 重置时空等待
 # 7. One-Hot动作生成和解析
+# 8. EpisodicLifeEnv，多条生命模拟单条生命
 class Atari:
     LOCK = None
     metadata = {}
@@ -109,6 +110,7 @@ class Atari:
                 self._screen(self._buffer[1])
             if over:
                 break
+            # 增加了类似EpisodicLifeEnv
             if self._lives != "unused":
                 current = self._ale.lives()
                 if current < self._last_lives:
