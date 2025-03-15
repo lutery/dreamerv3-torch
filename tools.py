@@ -211,6 +211,7 @@ def simulate(
                 transition["action"] = a
             transition["reward"] = r
             # discount是一个衰减因子，用于计算折扣回报，如果d为false，discount为1，否则为0
+            # 在我的代码中，将这部分放在外面
             transition["discount"] = info.get("discount", np.array(1 - float(d)))
             # 将执行的每一步存储到cache中
             add_to_cache(cache, env.id, transition)
