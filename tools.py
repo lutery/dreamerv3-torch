@@ -174,6 +174,10 @@ def simulate(
                 # replace obs with done by initial state
                 obs[index] = result
         # step agents
+        # for k in obs[0]是在遍历k值,即obs中的image reward discount等
+        # [o[k] for o in obs]获取每个obs中对应k的值，重新组成一个列表
+        # np.stack([o[k] for o in obs])将这个列表转换为numpy的数组
+        # key: np.stack([o[k] for o in obs]) 是将转换后的numpy重新组织为字典
         obs = {k: np.stack([o[k] for o in obs]) for k in obs[0] if "log_" not in k}
         # 有点像ptan，多了一个done
         action, agent_state = agent(obs, done, agent_state)
